@@ -1,4 +1,22 @@
 [submodule "apps/nudex-frontend"]
 	path = apps/nudex-frontend
-	url = https://github.com/tu-organizacion/nudex-frontend.git
+	url = https://github.com/diegodevitte/nudex-frontend.git
 	branch = main
+[submodule "services/nudex-api-gateway"]
+	path = services/nudex-api-gateway
+	url = https://github.com/diegodevitte/nudex-api-gateway.git
+[submodule "services/nudex-microservice-catalog"]
+	path = services/nudex-microservice-catalog
+	url = https://github.com/diegodevitte/nudex-microservice-catalog.git
+[submodule "services/nudex-microservice-users"]
+	path = services/nudex-microservice-users
+	url = https://github.com/diegodevitte/nudex-microservice-users.git
+[submodule "services/nudex-microservice-library"]
+	path = services/nudex-microservice-library
+	url = https://github.com/diegodevitte/nudex-microservice-library.git
+[submodule "services/nudex-microservice-ingestion"]
+	path = services/nudex-microservice-ingestion
+	url = https://github.com/diegodevitte/nudex-microservice-ingestion.git
+[submodule "services/nudex-microservice-playback"]
+	path = services/nudex-microservice-playback
+	url = https://github.com/diegodevitte/nudex-microservice-playback.git
