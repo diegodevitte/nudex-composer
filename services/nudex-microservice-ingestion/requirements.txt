@@ -1,4 +1,0 @@
-aio-pika==9.3.1
-httpx==0.25.2
-asyncpg==0.29.0
-motor==3.3.2
