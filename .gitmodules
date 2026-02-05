@@ -1,0 +1,4 @@
+[submodule "apps/nudex-frontend"]
+	path = apps/nudex-frontend
+	url = https://github.com/tu-organizacion/nudex-frontend.git
+	branch = main

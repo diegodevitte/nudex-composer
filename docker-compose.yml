@@ -1,0 +1,314 @@
+version: '3.8'
+
+networks:
+  nudex-dev:
+    driver: bridge
+    name: nudex-dev
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  rabbitmq_data:
+
+services:
+  # === INFRASTRUCTURE ===
+  
+  # PostgreSQL - Catalog & Users
+  postgres:
+    image: postgres:15-alpine
+    container_name: nudex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nudex
+      POSTGRES_USER: nudex_user
+      POSTGRES_PASSWORD: nudex_pass
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nudex_user -d nudex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB - Library
+  mongodb:
+    image: mongo:7-jammy
+    container_name: nudex-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: nudex_mongo
+      MONGO_INITDB_ROOT_PASSWORD: nudex_mongo_pass
+      MONGO_INITDB_DATABASE: nudex_library
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis - Cache & Playback
+  redis:
+    image: redis:7-alpine
+    container_name: nudex-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass nudex_redis_pass
+    volumes:
+      - redis_data:/data
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ - Message Broker
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: nudex-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: nudex_rabbit
+      RABBITMQ_DEFAULT_PASS: nudex_rabbit_pass
+      RABBITMQ_DEFAULT_VHOST: nudex
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./scripts/rabbitmq-init.sh:/docker-entrypoint-initdb.d/init.sh
+    ports:
+      - "15672:15672"  # Management UI
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # === MICROSERVICES ===
+
+  # API Gateway - BFF único (Node + Fastify)
+  api-gateway:
+    build:
+      context: ./services/nudex-api-gateway
+      dockerfile: Dockerfile.dev
+    container_name: nudex-api-gateway
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - PORT=8080
+      - CORS_ORIGINS=http://localhost:3000
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+      - CATALOG_BASE_URL=http://catalog-service:8081
+      - USERS_BASE_URL=http://users-service:8082
+      - LIBRARY_BASE_URL=http://library-service:8083
+      - PLAYBACK_BASE_URL=http://playback-service:8085
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./services/nudex-api-gateway:/app
+      - /app/node_modules
+
+  # Catalog Service - Videos & Metadata (Go + PostgreSQL)
+  catalog-service:
+    build:
+      context: ./services/nudex-microservice-catalog
+      dockerfile: Dockerfile.dev
+    container_name: nudex-catalog-service
+    restart: unless-stopped
+    environment:
+      - GO_ENV=development
+      - PORT=8081
+      - POSTGRES_URL=postgresql://nudex_user:nudex_pass@postgres:5432/nudex_catalog
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+      - API_KEY=nudex_internal_catalog_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./services/nudex-microservice-catalog:/app
+
+  # Users Service - Auth & Users (NestJS + PostgreSQL)
+  users-service:
+    build:
+      context: ./services/nudex-microservice-users
+      dockerfile: Dockerfile.dev
+    container_name: nudex-users-service
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - PORT=8082
+      - POSTGRES_URL=postgresql://nudex_user:nudex_pass@postgres:5432/nudex_users
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+      - JWT_SECRET=nudex_super_secret_jwt_key_dev_2024
+      - JWT_EXPIRES_IN=24h
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./services/nudex-microservice-users:/app
+      - /app/node_modules
+
+  # Library Service - Favorites/History/Playlists (FastAPI + MongoDB)
+  library-service:
+    build:
+      context: ./services/nudex-microservice-library
+      dockerfile: Dockerfile.dev
+    container_name: nudex-library-service
+    restart: unless-stopped
+    environment:
+      - PYTHONENV=development
+      - PORT=8083
+      - MONGODB_URL=mongodb://nudex_mongo:nudex_mongo_pass@mongodb:27017/nudex_library
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./services/nudex-microservice-library:/app
+
+  # Ingestion Service - Data Pipeline Worker (Python)
+  ingestion-service:
+    build:
+      context: ./services/nudex-microservice-ingestion
+      dockerfile: Dockerfile.dev
+    container_name: nudex-ingestion-service
+    restart: unless-stopped
+    environment:
+      - PYTHONENV=development
+      - POSTGRES_URL=postgresql://nudex_user:nudex_pass@postgres:5432/nudex_catalog
+      - MONGODB_URL=mongodb://nudex_mongo:nudex_mongo_pass@mongodb:27017/nudex_library
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+      - CATALOG_INTERNAL_URL=http://catalog-service:8081
+      - CATALOG_API_KEY=nudex_internal_catalog_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      catalog-service:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    volumes:
+      - ./services/nudex-microservice-ingestion:/app
+
+  # Playback Service - Streaming & Tokens (Go + Redis)
+  playback-service:
+    build:
+      context: ./services/nudex-microservice-playback
+      dockerfile: Dockerfile.dev
+    container_name: nudex-playback-service
+    restart: unless-stopped
+    environment:
+      - GO_ENV=development
+      - PORT=8085
+      - REDIS_URL=redis://nudex_redis_pass@redis:6379
+      - RABBITMQ_URL=amqp://nudex_rabbit:nudex_rabbit_pass@rabbitmq:5672/nudex
+      - TOKEN_SECRET=nudex_playback_token_secret_dev
+      - TOKEN_TTL=3600
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./services/nudex-microservice-playback:/app
+
+  # === FRONTEND ===
+  
+  # Next.js Frontend
+  frontend:
+    build:
+      context: ./apps/nudex-frontend
+      dockerfile: Dockerfile.dev
+    container_name: nudex-frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/api
+      - NEXT_TELEMETRY_DISABLED=1
+      - WATCHPACK_POLLING=true
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - nudex-dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - ./apps/nudex-frontend:/app
+      - /app/node_modules
+      - /app/.next
